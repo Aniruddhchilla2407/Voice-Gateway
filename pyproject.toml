@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vgw"
+version = "0.1.0"
+description = "Low-latency voice gateway: turn-taking, barge-in, backpressure, tracing"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "pyyaml",
+    "python-dotenv",
+    "psutil",
+]
+
+[project.optional-dependencies]
+providers = ["groq", "edge-tts"]
+vad = ["webrtcvad-wheels"]
+eval = ["jiwer"]
+dev = ["pytest", "pytest-asyncio", "ruff", "httpx2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
