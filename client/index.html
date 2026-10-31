@@ -3,109 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Voice Gateway - metrics</title>
+  <title>Voice Gateway</title>
   <style>
-    :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e3;
-            --endpoint:#9aa5b1; --stt:#4c8bf5; --llm:#8e6bd8; --tts:#2fa36b; --out:#e0a030; }
-    @media (prefers-color-scheme: dark) {
-      :root { --bg:#16181c; --fg:#e8e8e8; --muted:#9a9a9a; --line:#2c2f36; }
-    }
-    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg);
-           max-width: 62rem; margin: 2rem auto; padding: 0 1rem; }
-    h1 { font-size: 1.3rem; } h2 { font-size: 1rem; margin-top: 2rem; }
-    table { border-collapse: collapse; width: 100%; font-size: .9rem; }
-    th, td { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid var(--line); }
-    th:first-child, td:first-child { text-align: left; }
-    .muted { color: var(--muted); font-size: .85rem; }
-    .bar { display: flex; height: 1.1rem; min-width: 12rem; }
-    .bar span { display: block; height: 100%; }
-    .legend span { display: inline-block; margin-right: 1rem; font-size: .85rem; }
-    .legend i { display: inline-block; width: .8rem; height: .8rem; margin-right: .3rem; vertical-align: middle; }
+    body { font-family: system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+    button { font-size: 1.1rem; padding: .6rem 1.4rem; cursor: pointer; }
+    #status { margin: 1rem 0; font-weight: 600; }
+    #log { font-family: ui-monospace, monospace; font-size: .85rem; color: #555; padding-left: 1.2rem; }
+    .hint { color: #777; font-size: .9rem; }
   </style>
 </head>
 <body>
-  <h1>Voice Gateway - live metrics</h1>
-  <div id="status" class="muted">loading...</div>
-
-  <h2>Latency across recent turns</h2>
-  <table id="latency"></table>
-
-  <h2>Efficiency</h2>
-  <div id="efficiency"></div>
-  <p class="muted">Characters, not tokens (roughly 4 characters per token in English; Hindi and Telugu use more tokens per character).</p>
-
-  <h2>Recent turns: where the time to first audio went</h2>
-  <div class="legend">
-    <span><i style="background:var(--endpoint)"></i>endpointing wait</span>
-    <span><i style="background:var(--stt)"></i>speech-to-text</span>
-    <span><i style="background:var(--llm)"></i>LLM to first sentence</span>
-    <span><i style="background:var(--tts)"></i>TTS to first audio</span>
-    <span><i style="background:var(--out)"></i>out</span>
-  </div>
-  <table id="turns"></table>
-
-  <script>
-    const ROWS = [
-      ["ttfa_ms", "Time to first audio"],
-      ["endpointing_ms", "Endpointing wait"],
-      ["stt_ms", "Speech-to-text"],
-      ["llm_first_token_ms", "LLM to first token"],
-      ["llm_first_sentence_ms", "LLM to first sentence"],
-      ["tts_first_audio_ms", "TTS to first audio"],
-      ["barge_in_cutoff_ms", "Barge-in to stop sent"],
-      ["cancel_ms", "Cancel (all work stopped)"],
-    ];
-    const SEGMENTS = [
-      ["endpointing_ms", "--endpoint"], ["stt_ms", "--stt"], ["llm_first_sentence_ms", "--llm"],
-      ["tts_first_audio_ms", "--tts"], ["out_ms", "--out"],
-    ];
-    const ms = (v) => (v == null ? "-" : Math.round(v));
-    const pct = (v) => (v == null ? "-" : Math.round(v * 100) + "%");
-
-    function renderLatency(summary) {
-      let html = "<tr><th>Stage (ms)</th><th>n</th><th>p50</th><th>p95</th><th>p99</th><th>max</th></tr>";
-      for (const [key, label] of ROWS) {
-        const s = summary.latency[key];
-        html += s
-          ? `<tr><td>${label}</td><td>${s.n}</td><td>${ms(s.p50)}</td><td>${ms(s.p95)}</td><td>${ms(s.p99)}</td><td>${ms(s.max)}</td></tr>`
-          : `<tr><td>${label}</td><td>0</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>`;
-      }
-      document.getElementById("latency").innerHTML = html;
-    }
-
-    function renderEfficiency(summary) {
-      const e = summary.efficiency;
-      document.getElementById("efficiency").innerHTML =
-        `<p>Written by the LLM: <b>${e.generated_chars}</b> &middot; sent to TTS: <b>${e.tts_chars}</b> &middot; actually heard: <b>${e.spoken_chars}</b></p>` +
-        `<p>Written but never heard: <b>${pct(e.unheard_generated_share)}</b> &middot; synthesized but never heard: <b>${pct(e.unheard_tts_share)}</b> &middot; average LLM input: <b>${ms(e.avg_input_chars)}</b> characters</p>`;
-    }
-
-    function renderTurns(turns) {
-      const maxTotal = Math.max(1, ...turns.map((t) => t.ttfa_ms || 0));
-      let html = "<tr><th>Turn</th><th>Outcome</th><th>Time to first audio</th><th>Breakdown</th></tr>";
-      for (const t of [...turns].reverse()) {
-        const bars = SEGMENTS.map(([key, color]) =>
-          `<span style="width:${((t[key] || 0) / maxTotal) * 100}%;background:var(${color})"></span>`).join("");
-        html += `<tr><td>${t.session_id}/${t.turn_id}</td><td>${t.outcome}</td><td>${ms(t.ttfa_ms)} ms</td>` +
-                `<td><div class="bar">${t.ttfa_ms == null ? "" : bars}</div></td></tr>`;
-      }
-      document.getElementById("turns").innerHTML = html;
-    }
-
-    async function refresh() {
-      const status = document.getElementById("status");
-      try {
-        const { summary, turns } = await (await fetch("/api/metrics")).json();
-        status.textContent = `${summary.turns} turns recorded - ${JSON.stringify(summary.outcomes)}`;
-        renderLatency(summary);
-        renderEfficiency(summary);
-        renderTurns(turns);
-      } catch (err) {
-        status.textContent = "server not reachable";
-      }
-    }
-    setInterval(refresh, 1000);
-    refresh();
-  </script>
+  <h1>Voice Gateway</h1>
+  <p class="hint">Use headphones: the browser's echo cancellation helps, but the speaker can still leak into the mic and look like an interruption.</p>
+  <button id="toggle">Start</button>
+  <div id="status">idle</div>
+  <ul id="log"></ul>
+  <p class="hint"><a href="dashboard.html">Metrics dashboard</a></p>
+  <script src="app.js"></script>
 </body>
 </html>

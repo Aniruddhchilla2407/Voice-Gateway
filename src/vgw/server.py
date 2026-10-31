@@ -73,6 +73,14 @@ def create_app(
     providers_factory()  # fail fast on bad configuration, e.g. a missing API key
     vad_factory = vad_factory or _default_vad
     cfg = cfg or _env_cfg()
+    logging.getLogger("vgw.server").info(
+        "settings: providers=%s vad=%s mode=%s hangover=%d ms barge_in_enabled=%s",
+        provider_set,
+        os.getenv("VGW_VAD", "webrtc"),
+        os.getenv("VGW_MODE", "gateway"),
+        cfg.hangover_ms,
+        cfg.barge_in_enabled,
+    )
 
     app = FastAPI(title="voice-gateway")
     app.state.metrics = MetricsStore()
