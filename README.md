@@ -16,9 +16,9 @@ It is not a new AI model: the three helpers are existing services. The work is t
 
 ## Results
 
-All numbers are measured by `python eval/run_benchmarks.py` and written to [docs/results.md](docs/results.md). They come from one Windows 11 machine (8 logical CPUs, Python 3.13) with the server and load generator on the same machine, so read them as comparisons between rows, not absolute capacity. A run is only counted as valid if the load generator's own frames left on time.
+The first four sections come from `python eval/run_benchmarks.py` (full output in [docs/results.md](docs/results.md)); the last comes from one live session. The benchmarks ran on one Windows 11 machine (8 logical CPUs, Python 3.13) with the server and load generator on the same machine, so read them as comparisons between rows, not absolute capacity. A run is only counted as valid if the load generator's own frames left on time and no caller failed.
 
-**Time to first audio** is measured from the caller's last speech frame to the first agent audio frame received. It includes a 600 ms endpointing wait, so the last column is what the gateway itself adds.
+**Time to first audio (TTFA)** is measured from the caller's last speech frame to the first agent audio frame received. It includes a 600 ms endpointing wait, so the "added" column below is what the gateway itself contributes.
 
 ### Gateway cost (zero-latency stand-in providers)
 
@@ -49,7 +49,23 @@ The stand-in TTS takes the same time for any text length, while real TTS takes l
 
 ### Efficiency, honestly
 
-In the interrupt-every-reply benchmark, 39% of the text the LLM wrote and the TTS synthesized was never heard. Both figures are equal because with fast providers the whole reply is already written and synthesized before the caller interrupts. So cancellation prevents wrong memory and wasted playback, but we do not claim it saves compute here. Efficiency figures use characters (about 4 per token in English), not tokens.
+In the interrupt-every-reply benchmark, 39% of the text the LLM wrote and the TTS synthesized was never heard. The two figures are equal because with fast stand-in providers the whole reply is already written and synthesized before the caller interrupts, so there cancellation prevents wrong memory and wasted playback but saves no compute. With real services the picture differs; see the live test below. Efficiency figures use characters (about 4 per token in English), not tokens.
+
+### Live test with real services
+
+One session on one machine and home connection, using Groq Whisper (`whisper-large-v3-turbo`), a Groq-hosted `openai/gpt-oss-120b` with low reasoning effort, and edge-tts. Most turns in this session were interrupted by new speech or noise before the agent finished, so only 14 turns reached audio. Treat these numbers as indicative, not a benchmark. Latency to real APIs also depends heavily on network distance.
+
+| Stage | Median |
+|---|---|
+| Endpointing wait | 591 ms |
+| Speech-to-text | 227 ms |
+| LLM to first sentence | 508 ms |
+| TTS to first audio | 1,007 ms |
+| **Time to first audio** | **2,358 ms** (p95 2,917 ms) |
+
+- Speech synthesis is the largest stage (about 43%), because each sentence is fetched and decoded in full before it plays. The deliberate 0.6 s endpointing wait is next. Streaming the decode and a shorter wait are the obvious next optimizations.
+- In 10 interruptions during playback, the stop signal was sent in under 1 ms after detection (detection itself needs about 140 ms of sustained speech; see Barge-in). All work for the cancelled turn had stopped within 4 ms in every one of 39 cancellations.
+- Efficiency: the model wrote 4,325 characters, of which 1,928 (45%) were sent to speech synthesis and 1,167 (27%) were heard. Cancelling early meant about 55% of the written text was never synthesized, which is real saved work because real TTS is slower than the stand-in used in the benchmarks above.
 
 ## How it works
 
@@ -60,6 +76,8 @@ In the interrupt-every-reply benchmark, 39% of the text the LLM wrote and the TT
             speech-to-text ─▶ LLM (streamed) ─▶ sentence chunker ─▶ text-to-speech ─▶ paced playout ─▶ speaker
                                     bounded queues give backpressure; one cancel stops every stage
 ```
+
+See [docs/architecture.md](docs/architecture.md) for the full design: the state machine, the barge-in sequence, failure handling and the design trade-offs.
 
 - **Endpointing.** Voice-activity detection with a silence "hangover" decides when the caller is done. The speech needed to start a turn is raised while the agent is talking.
 - **Streaming pipeline.** Stages run concurrently inside one `asyncio.TaskGroup`, connected by bounded queues. TTS starts on the first sentence while the LLM is still writing. Cancelling a turn cancels every stage, and a test checks that no tasks leak.
@@ -76,11 +94,11 @@ Requires Python 3.11+ and ffmpeg on your PATH (used to decode TTS audio).
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1          # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev,vad,providers]"
-cp .env.example .env                   # add GROQ_API_KEY to use the real providers
+cp .env.example .env                   # add GROQ_API_KEY and set VGW_PROVIDERS=groq for real providers
 uvicorn vgw.server:app --port 8000     # no --reload on Windows with real providers
 ```
 
-Open http://localhost:8000 (use headphones) and the dashboard at http://localhost:8000/dashboard.html. With `VGW_PROVIDERS=stub` (the default) the agent answers with a beep, which is enough to test turn-taking and interruption by ear. With `VGW_PROVIDERS=groq` it uses Groq Whisper for speech-to-text, a Groq-hosted `gpt-oss` model for replies, and edge-tts for speech.
+Open http://localhost:8000 (use headphones) and the dashboard at http://localhost:8000/dashboard.html. With `VGW_PROVIDERS=stub` (the default) the agent answers with a beep, which is enough to test turn-taking and interruption by ear. With `VGW_PROVIDERS=groq` it uses Groq Whisper for speech-to-text, a Groq-hosted `gpt-oss` model for replies, and edge-tts for speech. The first log line after startup shows the settings in effect. Note that variables set in your shell override `.env`.
 
 ```powershell
 pytest -q                                   # unit and integration tests
@@ -92,8 +110,12 @@ python eval/run_benchmarks.py               # full matrix, writes docs/results.m
 
 - The demo agent cannot actually book anything; the tool-calling loop is not built yet.
 - A failed provider call ends that turn with an error in the trace, but the caller hears silence; spoken recovery and provider failover are future work.
+- If the caller speaks again before the agent has started talking, the pending reply is cancelled and the new speech is handled instead. With a reply latency of 2+ seconds this can chain.
 - Each TTS sentence is fetched and decoded in full before it plays. Streaming the decode would cut time to first audio.
 - Whisper can hallucinate text on pure noise, which would produce a nonsense turn after a false trigger.
+- No speech-recognition accuracy (word error rate) evaluation yet; speech-to-text is a pluggable provider, so this is future work.
+- No scripted multi-language task evaluation (for example clinic booking in English, Hindi and Telugu); this needs the tool-calling loop.
+- No authentication on the WebSocket, metrics or dashboard endpoints: local use only.
 - edge-tts uses an unofficial Microsoft endpoint and may need upgrading if it breaks.
 - Benchmarks were run on one machine; scaling beyond one process is untested.
 
@@ -103,8 +125,13 @@ python eval/run_benchmarks.py               # full matrix, writes docs/results.m
 src/vgw/          the gateway: turn manager, pipeline, endpointing, providers, tracing
 client/           browser client and metrics dashboard
 eval/             load generator and benchmark runner
-docs/results.md   latest benchmark output
+docs/             architecture.md and the latest benchmark output (results.md)
 tests/            automated tests
+LICENSE           MIT
 ```
 
 Built with Python, FastAPI/asyncio, WebRTC VAD, Groq (Whisper large-v3-turbo and gpt-oss), edge-tts and ffmpeg.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
